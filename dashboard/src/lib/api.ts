@@ -51,6 +51,16 @@ export const api = {
   },
   stores: {
     list: () => apiFetch<Store[]>("/api/v1/stores"),
+    get: (id: string) => apiFetch<Store>(`/api/v1/stores/${id}`),
+    create: (data: { name: string; niche?: string; shopify_store_url?: string; shopify_access_token?: string }) =>
+      apiFetch<Store>("/api/v1/stores", { method: "POST", body: JSON.stringify(data) }),
+    connect: (id: string, shopify_store_url: string, shopify_access_token: string) =>
+      apiFetch<Store & { verified: boolean }>(`/api/v1/stores/${id}/connect`, {
+        method: "POST",
+        body: JSON.stringify({ shopify_store_url, shopify_access_token }),
+      }),
+    disconnect: (id: string) =>
+      apiFetch(`/api/v1/stores/${id}/connect`, { method: "DELETE" }),
   },
 };
 
@@ -145,4 +155,7 @@ export interface Store {
   niche?: string;
   platform: string;
   status: string;
+  shopify_store_url?: string;
+  connected: boolean;
+  shopify_access_token_hint?: string;
 }

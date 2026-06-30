@@ -98,6 +98,7 @@ async def decide_approval(
         approval.approved_at = now
 
         # Execute the approved action
+        launch_result: dict = {}
         if approval.request_type == "product_launch" and approval.product_id:
             prod_result = await db.execute(
                 select(Product).where(Product.id == approval.product_id)
@@ -105,6 +106,8 @@ async def decide_approval(
             product = prod_result.scalar_one_or_none()
             if product:
                 product.status = ProductStatus.APPROVED
+                from agents.product_launcher import launch_product
+                launch_result = await launch_product(product, db)
 
         await event_bus.publish(Events.APPROVAL_RECEIVED, {
             "approval_id": str(approval_id),
@@ -137,4 +140,5 @@ async def decide_approval(
         "id": str(approval.id),
         "status": approval.status.value,
         "decided_at": now.isoformat(),
+        "launch": launch_result if launch_result else None,
     }

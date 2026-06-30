@@ -4,10 +4,13 @@ import { useEffect, useState } from "react";
 import { api, type Approval } from "@/lib/api";
 import { ScoreBadge } from "@/components/ui/ScoreBadge";
 
+type LaunchResult = { launched: boolean; shopify_admin_url?: string; store?: string; reason?: string };
+
 export default function ApprovalsPage() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(true);
   const [deciding, setDeciding] = useState<string | null>(null);
+  const [launched, setLaunched] = useState<Record<string, LaunchResult>>({});
 
   const load = () => {
     api.approvals.list("pending").then(setApprovals).finally(() => setLoading(false));
@@ -18,8 +21,13 @@ export default function ApprovalsPage() {
   const decide = async (id: string, decision: "approve" | "reject") => {
     setDeciding(id);
     try {
-      await api.approvals.decide(id, decision);
-      setApprovals(prev => prev.filter(a => a.id !== id));
+      const result = await api.approvals.decide(id, decision) as { launch?: LaunchResult };
+      if (decision === "approve" && result?.launch) {
+        setLaunched(prev => ({ ...prev, [id]: result.launch! }));
+        setTimeout(() => setApprovals(prev => prev.filter(a => a.id !== id)), 3000);
+      } else {
+        setApprovals(prev => prev.filter(a => a.id !== id));
+      }
     } finally {
       setDeciding(null);
     }
@@ -82,17 +90,39 @@ export default function ApprovalsPage() {
               <p className="text-xs text-orange-400/70">Risk: {approval.risk_assessment}</p>
             )}
 
+            {launched[approval.id] && (
+              <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded ${
+                launched[approval.id].launched
+                  ? "bg-green-500/10 border border-green-500/30 text-green-400"
+                  : "bg-orange-500/10 border border-orange-500/30 text-orange-400"
+              }`}>
+                {launched[approval.id].launched ? (
+                  <>
+                    ✓ Launched to Shopify ({launched[approval.id].store})
+                    {launched[approval.id].shopify_admin_url && (
+                      <a href={launched[approval.id].shopify_admin_url} target="_blank" rel="noreferrer"
+                        className="underline ml-1">View →</a>
+                    )}
+                  </>
+                ) : (
+                  <>Approved · {launched[approval.id].reason === "store_not_connected"
+                    ? "Connect a store to auto-launch"
+                    : launched[approval.id].reason}</>
+                )}
+              </div>
+            )}
+
             <div className="flex items-center gap-3 pt-1">
               <button
                 onClick={() => decide(approval.id, "approve")}
-                disabled={deciding === approval.id}
+                disabled={deciding === approval.id || !!launched[approval.id]}
                 className="px-4 py-1.5 bg-green-500/10 border border-green-500/30 text-green-400 text-sm rounded hover:bg-green-500/20 transition-colors disabled:opacity-50"
               >
-                {deciding === approval.id ? "Processing..." : "Approve"}
+                {deciding === approval.id ? "Launching…" : "Approve & Launch"}
               </button>
               <button
                 onClick={() => decide(approval.id, "reject")}
-                disabled={deciding === approval.id}
+                disabled={deciding === approval.id || !!launched[approval.id]}
                 className="px-4 py-1.5 bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded hover:bg-red-500/20 transition-colors disabled:opacity-50"
               >
                 Reject
