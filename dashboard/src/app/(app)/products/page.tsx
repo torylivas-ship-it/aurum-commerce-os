@@ -14,7 +14,7 @@ export default function ProductsPage() {
 
   const load = (status?: string) => {
     setLoading(true);
-    const params = status && status !== "all" ? { status } : {};
+    const params = status && status !== "all" ? { status } : undefined;
     api.products.list(params).then(setProducts).finally(() => setLoading(false));
   };
 
