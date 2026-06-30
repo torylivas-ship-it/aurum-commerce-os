@@ -10,7 +10,6 @@ celery_app = Celery(
     include=[
         "agents.product_discovery.tasks",
         "agents.trend_intelligence.tasks",
-        "agents.opportunity_scorer.tasks",
         "agents.competitor_intel.tasks",
         "agents.executive_advisor.tasks",
         "agents.risk_intelligence.tasks",
