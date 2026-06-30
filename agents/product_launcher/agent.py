@@ -52,16 +52,16 @@ class ProductLauncher:
             )
             return {"launched": False, "reason": "shopify_error", "error": str(exc)}
 
+        shopify_admin_url = (
+            f"https://{store.shopify_store_url}/admin/products/{shopify_product['id']}"
+        )
+
         product.shopify_product_id = str(shopify_product["id"])
         product.status = ProductStatus.LAUNCHED
-        if product.meta is None:
-            product.meta = {}
-        product.meta = {
-            **product.meta,
+        product.evidence = {
+            **(product.evidence or {}),
             "shopify_handle": shopify_product.get("handle"),
-            "shopify_admin_url": (
-                f"https://{store.shopify_store_url}/admin/products/{shopify_product['id']}"
-            ),
+            "shopify_admin_url": shopify_admin_url,
             "launched_at": datetime.now(timezone.utc).isoformat(),
             "store_name": store.name,
         }
@@ -85,7 +85,7 @@ class ProductLauncher:
         return {
             "launched": True,
             "shopify_product_id": product.shopify_product_id,
-            "shopify_admin_url": product.meta["shopify_admin_url"],
+            "shopify_admin_url": shopify_admin_url,
             "store": store.name,
         }
 
