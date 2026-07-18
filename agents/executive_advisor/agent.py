@@ -69,6 +69,7 @@ class ExecutiveAdvisorAgent(BaseAgent):
         })
 
         await self._send_email_brief(brief_content, today)
+        await self._send_telegram_brief(brief_content, today)
 
         return AgentResult.ok(
             data={
@@ -290,3 +291,32 @@ Brief:
             self.logger.info("email.sent", recipients=settings.report_recipients_list)
         except Exception as e:
             self.logger.warning("email.failed", error=str(e))
+
+    async def _send_telegram_brief(self, brief: str, today: datetime) -> None:
+        from core.config import settings
+        import aiohttp
+
+        if not settings.telegram_bot_token or not settings.telegram_chat_id:
+            self.logger.info("telegram.skipped", reason="bot token/chat id not configured")
+            return
+
+        # Telegram caps a single message at 4096 characters.
+        text = f"Aurum Commerce Brief — {today.strftime('%B %d, %Y')}\n\n{brief}"
+        if len(text) > 4096:
+            text = text[:4090] + "\n[…]"
+
+        url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json={"chat_id": settings.telegram_chat_id, "text": text},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    if r.status == 200:
+                        self.logger.info("telegram.sent", chat_id=settings.telegram_chat_id)
+                    else:
+                        body = await r.text()
+                        self.logger.warning("telegram.failed", status=r.status, body=body[:300])
+        except Exception as e:
+            self.logger.warning("telegram.failed", error=str(e))

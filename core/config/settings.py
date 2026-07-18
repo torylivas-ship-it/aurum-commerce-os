@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     def report_recipients_list(self) -> List[str]:
         return [r.strip() for r in self.report_recipients.split(",")]
 
+    # ── Telegram ──────────────────────────────────────────────────────────────
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+
     # ── Tandem Browser ────────────────────────────────────────────────────────
     tandem_ws_url: str = "ws://localhost:9222"
     tandem_timeout: int = 30
