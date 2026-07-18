@@ -158,7 +158,14 @@ class ProductLauncher:
         except Exception as exc:
             logger.warning("enrich_description_failed", error=str(exc))
 
-        updates: dict = {"status": "active"}
+        # "status": "active" alone does NOT publish the product to the Online
+        # Store sales channel — that's controlled separately by published_at.
+        # Without it, products sit active-but-invisible/unpurchasable.
+        updates: dict = {
+            "status": "active",
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "published_scope": "web",
+        }
         if description:
             updates["body_html"] = description
         updates["images"] = [{"src": image_url, "alt": product.name}]
