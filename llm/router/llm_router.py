@@ -63,7 +63,7 @@ class LLMRequest:
 class OllamaClient:
     def __init__(self):
         self.base_url = settings.ollama_base_url
-        self.timeout = httpx.Timeout(120.0, connect=10.0)
+        self.timeout = httpx.Timeout(480.0, connect=10.0)
 
     def _resolve_model(self, model: LLMModel) -> str:
         mapping = {
