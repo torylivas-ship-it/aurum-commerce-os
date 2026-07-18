@@ -15,9 +15,10 @@ Products that pass are saved to the DB and an approval request is created
 for human review before launching.
 """
 import asyncio
+import random
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -46,6 +47,25 @@ _DEDUPE_STOPWORDS = {
 # signatures overlap by at least this fraction (of the smaller set).
 _DEDUPE_SIMILARITY_THRESHOLD = 0.6
 
+# Broader pool to rotate through each run, instead of always scanning the
+# same fixed niches — the LLM scans otherwise produce near-identical
+# suggestions run after run since the prompt barely changes.
+_ALL_NICHES = [
+    "home kitchen", "fitness", "pets", "automotive", "tech accessories",
+    "outdoor", "beauty personal care", "office productivity", "baby toddler",
+    "gaming", "travel", "gardening", "health wellness",
+    "cleaning organization", "kids toys", "photography", "cycling",
+    "home security", "sustainable eco-friendly", "crafts hobbies",
+]
+
+# How many of the most-common already-discovered products to name in the
+# LLM prompts so it stops re-suggesting the same staples every run.
+_MAX_KNOWN_PRODUCTS_IN_PROMPT = 100
+
+# Idea-generation calls get a higher temperature than analytical calls so
+# the LLM doesn't converge on the same handful of ideas every run.
+_IDEA_GENERATION_TEMPERATURE = 0.9
+
 
 class ProductDiscoveryAgent(BaseAgent):
     name = "product_discovery"
@@ -60,18 +80,27 @@ class ProductDiscoveryAgent(BaseAgent):
         self.scorer = OpportunityScorer()
 
     async def run(self, niches: Optional[List[str]] = None, limit: int = 50, **kwargs) -> AgentResult:
-        niches = niches or ["home kitchen", "fitness", "pets", "automotive", "tech accessories", "outdoor"]
+        # Rotate through a broad niche pool by default instead of always
+        # scanning the same 6, so the LLM prompts vary run to run.
+        niches = niches or random.sample(_ALL_NICHES, k=6)
 
         self.logger.info("discovery.starting", niches=niches, limit=limit)
+
+        # Fetch the existing catalog first so the LLM scans can be told what
+        # we already carry and avoid re-suggesting it.
+        async with AsyncSessionLocal() as db:
+            existing_signatures, known_product_names = await self._existing_catalog(db)
+
+        known_products_prompt = known_product_names[:_MAX_KNOWN_PRODUCTS_IN_PROMPT]
 
         raw_candidates: List[Dict] = []
 
         # Gather from all sources concurrently
         results = await asyncio.gather(
             self._scan_reddit(niches),
-            self._scan_google_trends(niches),
-            self._scan_aliexpress(niches),
-            self._scan_with_llm(niches),
+            self._scan_google_trends(niches, known_products_prompt),
+            self._scan_aliexpress(niches, known_products_prompt),
+            self._scan_with_llm(niches, known_products_prompt),
             return_exceptions=True,
         )
 
@@ -86,9 +115,6 @@ class ProductDiscoveryAgent(BaseAgent):
         # Deduplicate by name similarity, against both this batch and every
         # product ever discovered (regardless of status) so the same idea
         # doesn't get re-submitted for approval run after run.
-        async with AsyncSessionLocal() as db:
-            existing_signatures = await self._existing_signatures(db)
-
         candidates = self._deduplicate(raw_candidates, existing_signatures)[:limit]
         self.logger.info(
             "discovery.deduplicated",
@@ -199,12 +225,25 @@ class ProductDiscoveryAgent(BaseAgent):
 
         return candidates
 
-    async def _scan_google_trends(self, niches: List[str]) -> List[Dict]:
+    def _avoid_clause(self, known_products: List[str]) -> str:
+        if not known_products:
+            return ""
+        known_str = "; ".join(known_products)
+        return (
+            f" We already carry these products (or close variants/rewordings of them) — "
+            f"do NOT suggest any of them again: {known_str}. Prioritize genuinely different "
+            "product ideas over common dropshipping staples like phone mounts, GaN/USB-C "
+            "chargers, resistance bands, LED strips, or water bottles unless you have a "
+            "truly novel angle not already covered above."
+        )
+
+    async def _scan_google_trends(self, niches: List[str], known_products: Optional[List[str]] = None) -> List[Dict]:
         """Use fast LLM to generate product ideas based on Google Trends patterns."""
         try:
             niche_str = ", ".join(niches)
             prompt = (
-                f"List 8 trending ecommerce products for niches: {niche_str}. "
+                f"List 8 trending ecommerce products for niches: {niche_str}."
+                f"{self._avoid_clause(known_products or [])} "
                 "Return ONLY a JSON array, no explanation:\n"
                 '[{"name":"Product","category":"niche","supplier_cost":10.0,"shipping_cost":3.0,'
                 '"estimated_selling_price":44.99,"trend_score":75,"search_volume_score":70,'
@@ -212,7 +251,7 @@ class ProductDiscoveryAgent(BaseAgent):
                 '"source_platform":"google_trends","data_sources_count":2,"data_freshness_days":1,'
                 '"evidence":{"trend_direction":"rising"}}]'
             )
-            data = await self.think_json(prompt, model=LLMModel.FAST)
+            data = await self.think_json(prompt, model=LLMModel.FAST, temperature=_IDEA_GENERATION_TEMPERATURE)
             if isinstance(data, list):
                 for item in data:
                     item.setdefault("data_sources_count", 2)
@@ -224,12 +263,13 @@ class ProductDiscoveryAgent(BaseAgent):
             self.logger.warning("google_trends.llm_failed", error=str(e))
         return []
 
-    async def _scan_aliexpress(self, niches: List[str]) -> List[Dict]:
+    async def _scan_aliexpress(self, niches: List[str], known_products: Optional[List[str]] = None) -> List[Dict]:
         """Fast LLM scan for AliExpress/CJ Dropshipping trending products."""
         try:
             niche_str = ", ".join(niches)
             prompt = (
-                f"List 8 AliExpress bestsellers for niches: {niche_str}. "
+                f"List 8 AliExpress bestsellers for niches: {niche_str}."
+                f"{self._avoid_clause(known_products or [])} "
                 "Return ONLY JSON array:\n"
                 '[{"name":"Product","category":"niche","supplier_cost":8.0,"shipping_cost":2.5,'
                 '"estimated_selling_price":39.99,"trend_score":78,"search_volume_score":70,'
@@ -239,20 +279,21 @@ class ProductDiscoveryAgent(BaseAgent):
                 '"source_platform":"aliexpress","data_sources_count":3,"trend_consistency_score":75,'
                 '"evidence":{"monthly_orders":"3000+","avg_rating":4.7}}]'
             )
-            data = await self.think_json(prompt, model=LLMModel.FAST)
+            data = await self.think_json(prompt, model=LLMModel.FAST, temperature=_IDEA_GENERATION_TEMPERATURE)
             if isinstance(data, list):
                 return data
         except Exception as e:
             self.logger.warning("aliexpress.scan_failed", error=str(e))
         return []
 
-    async def _scan_with_llm(self, niches: List[str]) -> List[Dict]:
+    async def _scan_with_llm(self, niches: List[str], known_products: Optional[List[str]] = None) -> List[Dict]:
         """Fast LLM scan for TikTok/social commerce trending products."""
         try:
             niche_str = ", ".join(niches)
             prompt = (
                 f"List 8 viral TikTok/social commerce products for niches: {niche_str}. "
-                "Focus on impulse-buy $20-80 products. Return ONLY JSON array:\n"
+                f"Focus on impulse-buy $20-80 products.{self._avoid_clause(known_products or [])} "
+                "Return ONLY JSON array:\n"
                 '[{"name":"Product","category":"niche","supplier_cost":12.0,"shipping_cost":3.0,'
                 '"estimated_selling_price":49.99,"trend_score":85,"search_volume_score":72,'
                 '"social_signal_score":90,"sales_velocity_score":82,"competition_score":60,'
@@ -260,7 +301,7 @@ class ProductDiscoveryAgent(BaseAgent):
                 '"source_platform":"tiktok_trends","data_sources_count":3,"trend_consistency_score":80,'
                 '"evidence":{"viral_metric":"trending","ugc_potential":"high"}}]'
             )
-            data = await self.think_json(prompt, model=LLMModel.FAST)
+            data = await self.think_json(prompt, model=LLMModel.FAST, temperature=_IDEA_GENERATION_TEMPERATURE)
             if isinstance(data, list):
                 for item in data:
                     item.setdefault("source_platform", "trend_analysis")
@@ -316,9 +357,22 @@ class ProductDiscoveryAgent(BaseAgent):
         overlap = len(a & b) / min(len(a), len(b))
         return overlap >= _DEDUPE_SIMILARITY_THRESHOLD
 
-    async def _existing_signatures(self, db) -> List[FrozenSet[str]]:
+    async def _existing_catalog(self, db) -> Tuple[List[FrozenSet[str]], List[str]]:
+        """Every distinct product idea already in the DB (any status), as
+        both a signature list (for dedup) and a representative name per
+        idea (for telling the LLM what to avoid re-suggesting)."""
         result = await db.execute(select(Product.name))
-        return [self._keyword_signature(name) for (name,) in result.all() if name]
+        names = [name for (name,) in result.all() if name]
+
+        signatures: List[FrozenSet[str]] = []
+        representatives: List[str] = []
+        for name in names:
+            sig = self._keyword_signature(name)
+            if not sig or any(self._is_same_idea(sig, seen) for seen in signatures):
+                continue
+            signatures.append(sig)
+            representatives.append(name)
+        return signatures, representatives
 
     def _deduplicate(
         self, candidates: List[Dict], existing_signatures: Optional[List[FrozenSet[str]]] = None

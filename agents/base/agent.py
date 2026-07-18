@@ -134,11 +134,13 @@ class BaseAgent(ABC):
         prompt: str,
         system: Optional[str] = None,
         model: LLMModel = LLMModel.DEFAULT,
+        temperature: float = 0.3,
     ) -> dict:
         request = LLMRequest(
             messages=[LLMMessage(role="user", content=prompt)],
             system_prompt=system or self._default_system(),
             model=model,
+            temperature=temperature,
             json_mode=True,
         )
         return await self.llm.json_complete(request)
