@@ -56,7 +56,7 @@ class ExecutiveAdvisorAgent(BaseAgent):
                 structured_data=structured,
                 products_to_launch=structured.get("products_to_launch", []),
                 products_to_retire=structured.get("products_to_retire", []),
-                revenue_projection=structured.get("revenue_projection"),
+                revenue_projection=self._scalar_revenue_projection(structured.get("revenue_projection")),
                 confidence_score=structured.get("overall_confidence"),
             )
             db.add(brief)
@@ -219,6 +219,18 @@ Generate the brief in this exact format:
 """
 
         return await self.think(prompt, model=LLMModel.DEFAULT, max_tokens=4096)
+
+    def _scalar_revenue_projection(self, projection) -> Optional[float]:
+        """revenue_projection is a DB Float column (and what the dashboard
+        displays as one number), but the LLM returns a 30/60/90-day
+        breakdown dict. Use the 30-day figure as the headline value — the
+        full breakdown is preserved separately in structured_data."""
+        if isinstance(projection, dict):
+            value = projection.get("30_day_base")
+            return float(value) if isinstance(value, (int, float)) else None
+        if isinstance(projection, (int, float)):
+            return float(projection)
+        return None
 
     async def _extract_structured(self, brief: str, context: Dict) -> Dict:
         prompt = f"""Extract structured data from this executive brief.
