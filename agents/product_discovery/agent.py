@@ -15,9 +15,12 @@ Products that pass are saved to the DB and an approval request is created
 for human review before launching.
 """
 import asyncio
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 from uuid import uuid4
+
+from sqlalchemy import select
 
 from agents.base import BaseAgent, AgentResult
 from agents.opportunity_scorer import OpportunityScorer
@@ -31,6 +34,17 @@ from core.logging import get_logger
 from llm.router import LLMModel
 
 logger = get_logger(__name__)
+
+# Filler words that don't distinguish one product idea from another
+# (e.g. "GaN 65W USB-C Fast Charger" vs "GaN Fast Charger 65W").
+_DEDUPE_STOPWORDS = {
+    "w", "usb", "c", "multi", "port", "pack", "set", "with", "for",
+    "the", "a", "of", "and",
+}
+
+# Two product names are considered the same idea when their keyword
+# signatures overlap by at least this fraction (of the smaller set).
+_DEDUPE_SIMILARITY_THRESHOLD = 0.6
 
 
 class ProductDiscoveryAgent(BaseAgent):
@@ -69,8 +83,19 @@ class ProductDiscoveryAgent(BaseAgent):
 
         self.logger.info("discovery.raw_count", count=len(raw_candidates))
 
-        # Deduplicate by name similarity
-        candidates = self._deduplicate(raw_candidates)[:limit]
+        # Deduplicate by name similarity, against both this batch and every
+        # product ever discovered (regardless of status) so the same idea
+        # doesn't get re-submitted for approval run after run.
+        async with AsyncSessionLocal() as db:
+            existing_signatures = await self._existing_signatures(db)
+
+        candidates = self._deduplicate(raw_candidates, existing_signatures)[:limit]
+        self.logger.info(
+            "discovery.deduplicated",
+            raw=len(raw_candidates),
+            unique=len(candidates),
+            existing_products=len(existing_signatures),
+        )
 
         # Score each candidate
         scored = []
@@ -276,14 +301,36 @@ class ProductDiscoveryAgent(BaseAgent):
             supplier_url=d.get("supplier_url", ""),
         )
 
-    def _deduplicate(self, candidates: List[Dict]) -> List[Dict]:
-        seen = set()
+    def _keyword_signature(self, name: str) -> FrozenSet[str]:
+        """Order/wording-independent signature for a product name, used to
+        catch near-duplicates like 'GaN 65W USB-C Fast Charger' vs
+        'GaN Fast Charger 65W'."""
+        text = re.sub(r"\([^)]*\)", "", name)
+        text = re.sub(r"\d+", "", text)
+        words = set(re.findall(r"[a-z]+", text.lower())) - _DEDUPE_STOPWORDS
+        return frozenset(words)
+
+    def _is_same_idea(self, a: FrozenSet[str], b: FrozenSet[str]) -> bool:
+        if not a or not b:
+            return False
+        overlap = len(a & b) / min(len(a), len(b))
+        return overlap >= _DEDUPE_SIMILARITY_THRESHOLD
+
+    async def _existing_signatures(self, db) -> List[FrozenSet[str]]:
+        result = await db.execute(select(Product.name))
+        return [self._keyword_signature(name) for (name,) in result.all() if name]
+
+    def _deduplicate(
+        self, candidates: List[Dict], existing_signatures: Optional[List[FrozenSet[str]]] = None
+    ) -> List[Dict]:
+        seen_signatures: List[FrozenSet[str]] = list(existing_signatures or [])
         unique = []
         for c in candidates:
-            key = c.get("name", "").lower().strip()[:50]
-            if key and key not in seen:
-                seen.add(key)
-                unique.append(c)
+            sig = self._keyword_signature(c.get("name", ""))
+            if not sig or any(self._is_same_idea(sig, seen) for seen in seen_signatures):
+                continue
+            seen_signatures.append(sig)
+            unique.append(c)
         return unique
 
     async def _save_product(self, db, c_data: Dict, score) -> Product:
