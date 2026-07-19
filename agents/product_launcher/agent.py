@@ -109,7 +109,92 @@ class ProductLauncher:
         )
         return result.scalar_one_or_none()
 
-    async def _fetch_product_image(self, product: Product) -> Optional[str]:
+    async def _fetch_product_image(self, product: Product) -> dict:
+        """Best available photo of the product, as a Shopify image spec
+        ({"src": url} or {"attachment": base64, "filename": ...}).
+
+        Tries a real AliExpress listing photo first — for dropshipped
+        gadgets, general stock-photo libraries (Pexels) frequently have
+        nothing relevant and fall back to an unrelated keyword match
+        (e.g. an actual insect photo for "Ultrasonic Pest Repeller").
+        Falls back to Pexels, then a generic category placeholder, if
+        AliExpress/Tandem aren't available.
+        """
+        aliexpress_image = await self._fetch_aliexpress_image(product)
+        if aliexpress_image:
+            return aliexpress_image
+
+        pexels_url = await self._fetch_pexels_image(product)
+        return {"src": pexels_url, "alt": product.name}
+
+    async def _fetch_aliexpress_image(self, product: Product) -> Optional[dict]:
+        """Search AliExpress for a real photo of this exact product via
+        Tandem browser automation. Returns a Shopify image spec with the
+        image bytes embedded directly (not just a URL — letting Shopify
+        fetch from AliExpress's CDN itself was observed to get silently
+        dropped under repeated load), or None if Tandem/AliExpress aren't
+        reachable or no listing was found."""
+        import base64, json, os, time, urllib.parse, urllib.request
+
+        token_path = os.path.expanduser("~/.tandem/api-token")
+        if not os.path.exists(token_path):
+            return None
+
+        def _run() -> Optional[dict]:
+            tandem_token = open(token_path).read().strip()
+            tandem_api = "http://127.0.0.1:8765"
+            browser_ua = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+
+            def call(method, path, headers=None, body=None):
+                h = {"Authorization": f"Bearer {tandem_token}", "Content-Type": "application/json"}
+                if headers:
+                    h.update(headers)
+                data = json.dumps(body).encode() if body is not None else None
+                req = urllib.request.Request(f"{tandem_api}{path}", data=data, method=method, headers=h)
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return json.loads(r.read())
+
+            tab = call("POST", "/tabs/open", body={"url": "about:blank", "focus": True})
+            tab_id = tab["tab"]["id"]
+            call("POST", "/tabs/focus", body={"tabId": tab_id})
+
+            query = urllib.parse.quote(product.name)
+            call("POST", "/navigate", headers={"X-Tab-Id": tab_id},
+                 body={"url": f"https://www.aliexpress.com/wholesale?SearchText={query}"})
+            time.sleep(3.5)
+
+            js = (
+                "try { const links = Array.from(document.querySelectorAll('a[href*=\"item\"]')); "
+                "const results = []; "
+                "for (const a of links) { const img = a.querySelector('img'); "
+                "if (img && img.src && !img.src.includes('27x27') && !img.src.includes('30x30') "
+                "&& !img.src.includes('40x40')) { results.push(img.src); } "
+                "if (results.length >= 1) break; } "
+                "JSON.stringify(results); } catch(e) { JSON.stringify([]) }"
+            )
+            result = call("POST", "/execute-js", headers={"X-Tab-Id": tab_id}, body={"code": js})
+            raw = result.get("result", "[]")
+            srcs = json.loads(raw) if isinstance(raw, str) else raw
+            if not srcs:
+                return None
+
+            img_req = urllib.request.Request(srcs[0], headers={"User-Agent": browser_ua})
+            with urllib.request.urlopen(img_req, timeout=15) as r:
+                img_bytes = r.read()
+
+            return {"attachment": base64.b64encode(img_bytes).decode(), "filename": "product.jpg"}
+
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, _run)
+        except Exception as exc:
+            logger.warning("aliexpress_image_fetch_failed", product=product.name, error=str(exc))
+            return None
+
+    async def _fetch_pexels_image(self, product: Product) -> str:
         """Search Pexels for a photo of the actual product (by name), so
         each product gets a distinct, relevant image instead of every
         product in a category sharing one generic stock photo."""
@@ -210,7 +295,7 @@ class ProductLauncher:
         import urllib.request, urllib.parse
 
         category = (product.category or "general").lower()
-        image_url = await self._fetch_product_image(product)
+        image_spec = await self._fetch_product_image(product)
 
         prompt = (
             f"Write a compelling Shopify product description in HTML for: {product.name}. "
@@ -251,7 +336,7 @@ class ProductLauncher:
         }
         if description:
             updates["body_html"] = description
-        updates["images"] = [{"src": image_url, "alt": product.name}]
+        updates["images"] = [image_spec]
 
         try:
             await client.update_product(str(shopify_pid), updates)
