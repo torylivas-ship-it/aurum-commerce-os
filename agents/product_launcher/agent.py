@@ -231,8 +231,10 @@ class ProductLauncher:
                 {
                     "price": str(price),
                     "cost": str(cost),
-                    "inventory_management": "shopify",
-                    "inventory_quantity": 0,
+                    # Dropshipping: Aurum holds no physical stock — the
+                    # supplier fulfills directly. Don't track inventory at
+                    # all (inventory_management left unset) so the product
+                    # is always orderable instead of showing "Sold out".
                     "fulfillment_service": "manual",
                     "requires_shipping": True,
                     "weight": 0.5,
