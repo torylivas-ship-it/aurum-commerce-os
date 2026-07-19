@@ -159,33 +159,41 @@ class ProductLauncher:
 
             tab = call("POST", "/tabs/open", body={"url": "about:blank", "focus": True})
             tab_id = tab["tab"]["id"]
-            call("POST", "/tabs/focus", body={"tabId": tab_id})
+            try:
+                call("POST", "/tabs/focus", body={"tabId": tab_id})
 
-            query = urllib.parse.quote(product.name)
-            call("POST", "/navigate", headers={"X-Tab-Id": tab_id},
-                 body={"url": f"https://www.aliexpress.com/wholesale?SearchText={query}"})
-            time.sleep(3.5)
+                query = urllib.parse.quote(product.name)
+                call("POST", "/navigate", headers={"X-Tab-Id": tab_id},
+                     body={"url": f"https://www.aliexpress.com/wholesale?SearchText={query}"})
+                time.sleep(3.5)
 
-            js = (
-                "try { const links = Array.from(document.querySelectorAll('a[href*=\"item\"]')); "
-                "const results = []; "
-                "for (const a of links) { const img = a.querySelector('img'); "
-                "if (img && img.src && !img.src.includes('27x27') && !img.src.includes('30x30') "
-                "&& !img.src.includes('40x40')) { results.push(img.src); } "
-                "if (results.length >= 1) break; } "
-                "JSON.stringify(results); } catch(e) { JSON.stringify([]) }"
-            )
-            result = call("POST", "/execute-js", headers={"X-Tab-Id": tab_id}, body={"code": js})
-            raw = result.get("result", "[]")
-            srcs = json.loads(raw) if isinstance(raw, str) else raw
-            if not srcs:
-                return None
+                js = (
+                    "try { const links = Array.from(document.querySelectorAll('a[href*=\"item\"]')); "
+                    "const results = []; "
+                    "for (const a of links) { const img = a.querySelector('img'); "
+                    "if (img && img.src && !img.src.includes('27x27') && !img.src.includes('30x30') "
+                    "&& !img.src.includes('40x40')) { results.push(img.src); } "
+                    "if (results.length >= 1) break; } "
+                    "JSON.stringify(results); } catch(e) { JSON.stringify([]) }"
+                )
+                result = call("POST", "/execute-js", headers={"X-Tab-Id": tab_id}, body={"code": js})
+                raw = result.get("result", "[]")
+                srcs = json.loads(raw) if isinstance(raw, str) else raw
+                if not srcs:
+                    return None
 
-            img_req = urllib.request.Request(srcs[0], headers={"User-Agent": browser_ua})
-            with urllib.request.urlopen(img_req, timeout=15) as r:
-                img_bytes = r.read()
+                img_req = urllib.request.Request(srcs[0], headers={"User-Agent": browser_ua})
+                with urllib.request.urlopen(img_req, timeout=15) as r:
+                    img_bytes = r.read()
 
-            return {"attachment": base64.b64encode(img_bytes).decode(), "filename": "product.jpg"}
+                return {"attachment": base64.b64encode(img_bytes).decode(), "filename": "product.jpg"}
+            finally:
+                # Always close the tab, even on error/no-result, so
+                # every product launch doesn't leak an open tab forever.
+                try:
+                    call("POST", "/tabs/close", body={"tabId": tab_id})
+                except Exception:
+                    pass
 
         loop = asyncio.get_event_loop()
         try:
