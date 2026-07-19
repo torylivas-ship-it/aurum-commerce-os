@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.database import AsyncSessionLocal
 from core.database.models import Product, ProductStatus, Store
 from core.events import event_bus, Events
 from core.logging import get_logger
@@ -135,7 +136,12 @@ class ProductLauncher:
             return _fallback()
 
         query = urllib.parse.quote(product.name)
-        url = f"https://api.pexels.com/v1/search?query={query}&per_page=1&orientation=square"
+        # Fetch several candidates, not just the top result — different
+        # product names can still rank the same #1 photo (e.g. two
+        # unrelated gadgets both surfacing a generic "tech on desk" shot),
+        # so pick the first candidate not already used elsewhere in the
+        # catalog rather than always taking rank 1.
+        url = f"https://api.pexels.com/v1/search?query={query}&per_page=5&orientation=square"
 
         try:
             req = urllib.request.Request(url, headers={
@@ -154,11 +160,47 @@ class ProductLauncher:
             )
             photos = data.get("photos") or []
             if photos:
+                used_ids = await self._used_pexels_photo_ids()
+                for photo in photos:
+                    if photo["id"] not in used_ids:
+                        return photo["src"]["large"]
                 return photos[0]["src"]["large"]
         except Exception as exc:
             logger.warning("pexels_search_failed", product=product.name, error=str(exc))
 
         return _fallback()
+
+    async def _used_pexels_photo_ids(self) -> set:
+        """Photo IDs already in use on Shopify, so newly launched products
+        don't collide with an existing product's image."""
+        import re
+
+        store = None
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Store).where(Store.shopify_store_url.isnot(None)).limit(1)
+            )
+            store = result.scalar_one_or_none()
+        if not store:
+            return set()
+
+        access_token = store.config.get("shopify_access_token")
+        if not access_token:
+            return set()
+
+        client = ShopifyClient(store.shopify_store_url, access_token)
+        used_ids: set = set()
+        try:
+            products = await client.list_products(limit=250)
+            for p in products:
+                for img in p.get("images", []) or []:
+                    m = re.search(r"pexels-photo-(\d+)", img.get("src", ""))
+                    if m:
+                        used_ids.add(int(m.group(1)))
+        except Exception as exc:
+            logger.warning("used_photo_ids_lookup_failed", error=str(exc))
+
+        return used_ids
 
     async def _enrich_shopify_product(
         self, client: ShopifyClient, shopify_pid: int, product: Product
