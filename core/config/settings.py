@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     google_search_engine_id: Optional[str] = None
     serpapi_key: Optional[str] = None
 
+    # ── Pexels ────────────────────────────────────────────────────────────────
+    pexels_api_key: Optional[str] = None
+
     # ── Email ─────────────────────────────────────────────────────────────────
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587

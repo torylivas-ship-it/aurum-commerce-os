@@ -108,14 +108,15 @@ class ProductLauncher:
         )
         return result.scalar_one_or_none()
 
-    async def _enrich_shopify_product(
-        self, client: ShopifyClient, shopify_pid: int, product: Product
-    ) -> None:
-        """Generate AI description and attach a stock image to the Shopify product."""
+    async def _fetch_product_image(self, product: Product) -> Optional[str]:
+        """Search Pexels for a photo of the actual product (by name), so
+        each product gets a distinct, relevant image instead of every
+        product in a category sharing one generic stock photo."""
+        from core.config import settings
         import asyncio, json
         import urllib.request, urllib.parse
 
-        CATEGORY_IMAGES = {
+        CATEGORY_FALLBACK_IMAGES = {
             "fitness": "photo-1571019613454-1cb2f99b2d8b",
             "pets": "photo-1543466835-00a7907e9de1",
             "automotive": "photo-1492144534655-ae79c964c9d7",
@@ -125,9 +126,49 @@ class ProductLauncher:
             "general": "photo-1523275335684-37898b6baf30",
         }
 
+        def _fallback() -> str:
+            category = (product.category or "general").lower()
+            photo_id = CATEGORY_FALLBACK_IMAGES.get(category, CATEGORY_FALLBACK_IMAGES["general"])
+            return f"https://images.unsplash.com/{photo_id}?auto=format&fit=crop&w=800&q=80"
+
+        if not settings.pexels_api_key:
+            return _fallback()
+
+        query = urllib.parse.quote(product.name)
+        url = f"https://api.pexels.com/v1/search?query={query}&per_page=1&orientation=square"
+
+        try:
+            req = urllib.request.Request(url, headers={
+                "Authorization": settings.pexels_api_key,
+                # Pexels sits behind Cloudflare, which blocks Python's
+                # default urllib User-Agent outright (error 1010).
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+            })
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(
+                None,
+                lambda: json.loads(urllib.request.urlopen(req, timeout=15).read())
+            )
+            photos = data.get("photos") or []
+            if photos:
+                return photos[0]["src"]["large"]
+        except Exception as exc:
+            logger.warning("pexels_search_failed", product=product.name, error=str(exc))
+
+        return _fallback()
+
+    async def _enrich_shopify_product(
+        self, client: ShopifyClient, shopify_pid: int, product: Product
+    ) -> None:
+        """Generate AI description and attach a real per-product image to the Shopify product."""
+        import asyncio, json
+        import urllib.request, urllib.parse
+
         category = (product.category or "general").lower()
-        photo_id = CATEGORY_IMAGES.get(category, CATEGORY_IMAGES["general"])
-        image_url = f"https://images.unsplash.com/{photo_id}?auto=format&fit=crop&w=800&q=80"
+        image_url = await self._fetch_product_image(product)
 
         prompt = (
             f"Write a compelling Shopify product description in HTML for: {product.name}. "
