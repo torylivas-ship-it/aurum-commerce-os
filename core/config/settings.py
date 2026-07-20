@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     meta_app_secret: Optional[str] = None
     meta_access_token: Optional[str] = None
     meta_ad_account_id: Optional[str] = None
+    meta_page_id: Optional[str] = None
 
     # ── TikTok ───────────────────────────────────────────────────────────────
     tiktok_app_id: Optional[str] = None

@@ -93,6 +93,8 @@ class Events:
     APPROVAL_NEEDED      = "approval.needed"
     APPROVAL_RECEIVED    = "approval.received"
     BRIEF_GENERATED      = "brief.generated"
+    AD_CAMPAIGN_DRAFTED  = "ad_campaign.drafted"
+    AD_CAMPAIGN_LAUNCHED = "ad_campaign.launched"
     AGENT_STARTED        = "agent.started"
     AGENT_COMPLETED      = "agent.completed"
     AGENT_FAILED         = "agent.failed"

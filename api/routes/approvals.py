@@ -12,7 +12,9 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
-from core.database.models import ApprovalRequest, ApprovalStatus, Product, ProductStatus
+from core.database.models import (
+    AdCampaign, ApprovalRequest, ApprovalStatus, CampaignStatus, Product, ProductStatus,
+)
 from core.events import event_bus, Events
 
 router = APIRouter(prefix="/approvals")
@@ -91,6 +93,7 @@ async def decide_approval(
         )
 
     now = datetime.now(timezone.utc)
+    launch_result: dict = {}
 
     if decision.decision == "approve":
         approval.status = ApprovalStatus.APPROVED
@@ -98,7 +101,6 @@ async def decide_approval(
         approval.approved_at = now
 
         # Execute the approved action
-        launch_result: dict = {}
         if approval.request_type == "product_launch" and approval.product_id:
             prod_result = await db.execute(
                 select(Product).where(Product.id == approval.product_id)
@@ -108,6 +110,15 @@ async def decide_approval(
                 product.status = ProductStatus.APPROVED
                 from agents.product_launcher import launch_product
                 launch_result = await launch_product(product, db)
+
+        if approval.request_type == "ad_campaign_launch" and approval.campaign_id:
+            campaign_result = await db.execute(
+                select(AdCampaign).where(AdCampaign.id == approval.campaign_id)
+            )
+            campaign = campaign_result.scalar_one_or_none()
+            if campaign:
+                from agents.advertising import launch_ad_campaign
+                launch_result = await launch_ad_campaign(campaign, db)
 
         await event_bus.publish(Events.APPROVAL_RECEIVED, {
             "approval_id": str(approval_id),
@@ -129,6 +140,15 @@ async def decide_approval(
             if product:
                 product.status = ProductStatus.REJECTED
                 product.rejection_reason = decision.reason
+
+        if approval.request_type == "ad_campaign_launch" and approval.campaign_id:
+            campaign_result = await db.execute(
+                select(AdCampaign).where(AdCampaign.id == approval.campaign_id)
+            )
+            campaign = campaign_result.scalar_one_or_none()
+            if campaign:
+                campaign.status = CampaignStatus.REJECTED
+                campaign.rejection_reason = decision.reason
     else:
         raise HTTPException(
             status_code=400,

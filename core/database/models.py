@@ -66,6 +66,16 @@ class AlertSeverity(str, enum.Enum):
     CRITICAL = "critical"
 
 
+class CampaignStatus(str, enum.Enum):
+    DRAFT             = "draft"             # built, not yet submitted for approval
+    PENDING_APPROVAL  = "pending_approval"   # awaiting human sign-off (all ad spend requires this)
+    ACTIVE            = "active"             # live on the ad platform
+    PAUSED            = "paused"
+    REJECTED          = "rejected"
+    ENDED             = "ended"
+    FAILED            = "failed"             # platform API rejected it / error creating it
+
+
 # ── Store ─────────────────────────────────────────────────────────────────────
 
 class Store(Base, UUIDMixin, TimestampMixin):
@@ -140,6 +150,7 @@ class Product(Base, UUIDMixin, TimestampMixin):
     store: Mapped[Optional["Store"]] = relationship(back_populates="products")
     experiments: Mapped[list["Experiment"]] = relationship(back_populates="product")
     approvals: Mapped[list["ApprovalRequest"]] = relationship(back_populates="product")
+    ad_campaigns: Mapped[list["AdCampaign"]] = relationship(back_populates="product")
 
     __table_args__ = (
         Index("ix_products_status", "status"),
@@ -223,6 +234,9 @@ class ApprovalRequest(Base, UUIDMixin, TimestampMixin):
     product_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("products.id"), nullable=True
     )
+    campaign_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ad_campaigns.id"), nullable=True
+    )
     request_type: Mapped[str] = mapped_column(String(100), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
@@ -239,6 +253,7 @@ class ApprovalRequest(Base, UUIDMixin, TimestampMixin):
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     product: Mapped[Optional["Product"]] = relationship(back_populates="approvals")
+    campaign: Mapped[Optional["AdCampaign"]] = relationship()
 
     __table_args__ = (
         Index("ix_approval_requests_status", "status"),
@@ -377,4 +392,47 @@ class TrendSignal(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_trend_signals_keyword", "keyword"),
         Index("ix_trend_signals_platform", "platform"),
+    )
+
+
+# ── Ad Campaign ───────────────────────────────────────────────────────────────
+
+class AdCampaign(Base, UUIDMixin, TimestampMixin):
+    __tablename__ = "ad_campaigns"
+
+    store_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("stores.id"), nullable=True
+    )
+    product_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("products.id"), nullable=True
+    )
+    product: Mapped[Optional["Product"]] = relationship(back_populates="ad_campaigns")
+
+    platform: Mapped[str] = mapped_column(String(50), default="meta")
+    name: Mapped[str] = mapped_column(String(300), nullable=False)
+    objective: Mapped[str] = mapped_column(String(100), default="OUTCOME_SALES")
+    status: Mapped[CampaignStatus] = mapped_column(
+        SAEnum(CampaignStatus), default=CampaignStatus.DRAFT
+    )
+
+    daily_budget: Mapped[Optional[float]] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+
+    # Ad copy + audience, generated before approval so a human reviews
+    # exactly what will run, not just a budget number.
+    creative: Mapped[dict] = mapped_column(JSON, default=dict)
+    targeting: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # External IDs once actually created on the platform
+    platform_campaign_id: Mapped[Optional[str]] = mapped_column(String(100))
+    platform_adset_id: Mapped[Optional[str]] = mapped_column(String(100))
+    platform_ad_id: Mapped[Optional[str]] = mapped_column(String(100))
+
+    # Performance, refreshed periodically once live
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    rejection_reason: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_ad_campaigns_status", "status"),
+        Index("ix_ad_campaigns_product_id", "product_id"),
     )

@@ -44,7 +44,7 @@ app.add_middleware(
 # ── Routes ────────────────────────────────────────────────────────────────────
 from api.routes import (
     products, stores, agents, approvals,
-    dashboard, briefs, alerts, health
+    dashboard, briefs, alerts, health, campaigns
 )
 
 app.include_router(health.router,    prefix="",            tags=["System"])
@@ -55,6 +55,7 @@ app.include_router(agents.router,    prefix="/api/v1",     tags=["Agents"])
 app.include_router(approvals.router, prefix="/api/v1",     tags=["Approvals"])
 app.include_router(briefs.router,    prefix="/api/v1",     tags=["Briefs"])
 app.include_router(alerts.router,    prefix="/api/v1",     tags=["Alerts"])
+app.include_router(campaigns.router, prefix="/api/v1",     tags=["Campaigns"])
 
 
 @app.exception_handler(Exception)

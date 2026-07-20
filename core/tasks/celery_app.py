@@ -13,6 +13,7 @@ celery_app = Celery(
         "agents.competitor_intel.tasks",
         "agents.executive_advisor.tasks",
         "agents.risk_intelligence.tasks",
+        "agents.advertising.tasks",
     ],
 )
 
@@ -30,6 +31,7 @@ celery_app.conf.update(
         "agents.trend_intelligence.*": {"queue": "agents"},
         "agents.executive_advisor.*": {"queue": "reports"},
         "agents.risk_intelligence.*": {"queue": "agents"},
+        "agents.advertising.*": {"queue": "agents"},
     },
     beat_schedule={
         # Product discovery runs every 6 hours
@@ -56,6 +58,12 @@ celery_app.conf.update(
         "executive-brief": {
             "task": "agents.executive_advisor.tasks.generate_morning_brief",
             "schedule": crontab(minute=0, hour=7),
+        },
+        # Draft ad campaigns for top products daily — always requires
+        # human approval before anything is created on Meta.
+        "advertising-scan": {
+            "task": "agents.advertising.tasks.run_advertising_scan",
+            "schedule": crontab(minute=0, hour=8),
         },
     },
 )
