@@ -1,15 +1,15 @@
 """
-Advertising Agent — drafts Meta (Facebook/Instagram) ad campaigns for the
-best-performing launched products, with AI-generated creative and basic
-audience targeting.
+Advertising Agent — drafts Meta (Facebook/Instagram) and TikTok ad
+campaigns for the best-performing launched products, with AI-generated
+creative and basic audience targeting per platform.
 
 Safety model, matching the human-in-the-loop pattern used everywhere
 else in Aurum: this agent only ever creates campaigns in
 PENDING_APPROVAL status plus an ApprovalRequest. Nothing is created on
-Meta's platform until a human approves — and even then, every object
-created on Meta (campaign/ad set/ad) is left PAUSED there. Actually
-spending money requires a separate, explicit activation step that this
-agent does not perform.
+either platform until a human approves — and even then, every object
+created (campaign/ad set/ad, or campaign/ad group/ad on TikTok) is left
+paused there. Actually spending money requires a separate, explicit
+activation step that this agent does not perform.
 """
 from typing import Dict, List, Optional
 
@@ -22,13 +22,15 @@ from core.database.models import (
 from core.events import Events
 from core.logging import get_logger
 from integrations.meta import MetaClient
+from integrations.tiktok import TikTokClient
 from llm.router import LLMModel
 from sqlalchemy import select
 
 logger = get_logger(__name__)
 
-DEFAULT_DAILY_BUDGET = 15.00  # USD — conservative starter budget per campaign
-MAX_CAMPAIGNS_PER_RUN = 3
+DEFAULT_DAILY_BUDGET_META = 15.00    # USD — Meta's practical minimum for reliable delivery
+DEFAULT_DAILY_BUDGET_TIKTOK = 20.00  # USD — TikTok's documented campaign-level minimum
+MAX_CAMPAIGNS_PER_PLATFORM_PER_RUN = 3
 MIN_OPPORTUNITY_SCORE_FOR_ADS = 75.0
 
 CATEGORY_INTERESTS = {
@@ -44,26 +46,28 @@ CATEGORY_INTERESTS = {
 class AdvertisingAgent(BaseAgent):
     name = "advertising"
     description = (
-        "Drafts Meta ad campaigns for the best-performing launched products, "
-        "with AI-generated creative and audience targeting. Every campaign "
-        "requires human approval before any spend — nothing goes live "
-        "automatically, and objects created on Meta stay paused until "
-        "separately activated."
+        "Drafts Meta and TikTok ad campaigns for the best-performing "
+        "launched products, with AI-generated creative and audience "
+        "targeting. Every campaign requires human approval before any "
+        "spend — nothing goes live automatically, and objects created on "
+        "either platform stay paused until separately activated."
     )
 
     async def run(self, **kwargs) -> AgentResult:
         drafted: List[AdCampaign] = []
         async with AsyncSessionLocal() as db:
-            candidates = await self._find_candidates(db)
-            for product in candidates[:MAX_CAMPAIGNS_PER_RUN]:
-                campaign = await self._draft_campaign(db, product)
-                if campaign:
-                    drafted.append(campaign)
+            for platform in ("meta", "tiktok"):
+                candidates = await self._find_candidates(db, platform)
+                for product in candidates[:MAX_CAMPAIGNS_PER_PLATFORM_PER_RUN]:
+                    campaign = await self._draft_campaign(db, product, platform)
+                    if campaign:
+                        drafted.append(campaign)
             await db.commit()
 
         for campaign in drafted:
             await self._publish(Events.AD_CAMPAIGN_DRAFTED, {
                 "campaign_id": str(campaign.id),
+                "platform": campaign.platform,
                 "name": campaign.name,
                 "daily_budget": campaign.daily_budget,
             })
@@ -71,13 +75,15 @@ class AdvertisingAgent(BaseAgent):
         return AgentResult.ok(
             data={
                 "campaigns_drafted": len(drafted),
-                "candidates_considered": len(candidates),
+                "by_platform": {
+                    p: sum(1 for c in drafted if c.platform == p) for p in ("meta", "tiktok")
+                },
             }
         )
 
-    async def _find_candidates(self, db) -> List[Product]:
+    async def _find_candidates(self, db, platform: str) -> List[Product]:
         """Launched products with a good opportunity score that don't
-        already have a campaign in flight."""
+        already have a campaign in flight on this platform."""
         result = await db.execute(
             select(Product)
             .where(Product.status.in_([ProductStatus.LAUNCHED, ProductStatus.SCALING]))
@@ -88,28 +94,31 @@ class AdvertisingAgent(BaseAgent):
 
         existing = await db.execute(
             select(AdCampaign.product_id).where(
+                AdCampaign.platform == platform,
                 AdCampaign.status.in_([
                     CampaignStatus.DRAFT, CampaignStatus.PENDING_APPROVAL,
                     CampaignStatus.ACTIVE, CampaignStatus.PAUSED,
-                ])
+                ]),
             )
         )
         already_has_campaign = {row[0] for row in existing.all()}
 
         return [p for p in products if p.id not in already_has_campaign]
 
-    async def _draft_campaign(self, db, product: Product) -> Optional[AdCampaign]:
-        creative = await self._generate_creative(product)
-        targeting = self._build_targeting(product)
+    async def _draft_campaign(self, db, product: Product, platform: str) -> Optional[AdCampaign]:
+        creative = await self._generate_creative(product, platform)
+        targeting = self._build_targeting(product, platform)
+        daily_budget = DEFAULT_DAILY_BUDGET_META if platform == "meta" else DEFAULT_DAILY_BUDGET_TIKTOK
+        platform_label = "Meta" if platform == "meta" else "TikTok"
 
         campaign = AdCampaign(
             product_id=product.id,
             store_id=product.store_id,
-            platform="meta",
+            platform=platform,
             name=f"{product.name} — Conversions",
-            objective="OUTCOME_SALES",
+            objective="OUTCOME_SALES" if platform == "meta" else "CONVERSIONS",
             status=CampaignStatus.PENDING_APPROVAL,
-            daily_budget=DEFAULT_DAILY_BUDGET,
+            daily_budget=daily_budget,
             creative=creative,
             targeting=targeting,
         )
@@ -120,44 +129,60 @@ class AdvertisingAgent(BaseAgent):
         db.add(ApprovalRequest(
             campaign_id=campaign.id,
             request_type="ad_campaign_launch",
-            title=f"Launch ad campaign: {product.name}",
+            title=f"Launch {platform_label} ad campaign: {product.name}",
             description=(
                 f"{creative.get('primary_text', '')}\n\n"
-                f"Daily budget: ${DEFAULT_DAILY_BUDGET:.2f} | "
+                f"Daily budget: ${daily_budget:.2f} | "
                 f"Targeting: {targeting.get('summary', 'general audience')}"
             ),
             data={
                 "campaign_id": str(campaign.id),
                 "product_id": str(product.id),
-                "daily_budget": DEFAULT_DAILY_BUDGET,
+                "platform": platform,
+                "daily_budget": daily_budget,
                 "creative": creative,
                 "targeting": targeting,
             },
-            impact=f"Est. reach driven by ${DEFAULT_DAILY_BUDGET:.2f}/day{margin_note}",
+            impact=f"Est. reach driven by ${daily_budget:.2f}/day{margin_note}",
             confidence_score=product.confidence_score,
             risk_assessment=(
-                "Real ad spend once activated. Approving here only creates "
-                "the campaign on Meta in PAUSED status — a separate manual "
-                "step in Meta Ads Manager is required to actually spend."
+                f"Real ad spend once activated. Approving here only creates "
+                f"the campaign on {platform_label} in a paused state — a "
+                f"separate manual step in {platform_label}'s ads manager is "
+                f"required to actually spend."
             ),
         ))
 
-        logger.info("ad_campaign.drafted", product=product.name, campaign_id=str(campaign.id))
+        logger.info("ad_campaign.drafted", product=product.name, platform=platform, campaign_id=str(campaign.id))
         return campaign
 
-    async def _generate_creative(self, product: Product) -> Dict:
-        prompt = (
-            f"Write Facebook/Instagram ad copy for this product:\n"
-            f"Name: {product.name}\n"
-            f"Category: {product.category}\n"
-            f"Price: ${product.selling_price or 0:.2f}\n"
-            f"Description: {(product.description or '')[:300]}\n\n"
-            "Return JSON only:\n"
-            '{"headline": "...", "primary_text": "...", "description": "..."}\n'
-            "headline: max 40 chars, punchy. primary_text: 1-2 sentences, "
-            "benefit-focused, include a light call to action. description: "
-            "max 30 chars, e.g. a price or urgency hook."
-        )
+    async def _generate_creative(self, product: Product, platform: str) -> Dict:
+        if platform == "tiktok":
+            prompt = (
+                f"Write TikTok ad copy for this product:\n"
+                f"Name: {product.name}\n"
+                f"Category: {product.category}\n"
+                f"Price: ${product.selling_price or 0:.2f}\n"
+                f"Description: {(product.description or '')[:300]}\n\n"
+                "Return JSON only:\n"
+                '{"headline": "...", "primary_text": "..."}\n'
+                "headline: max 40 chars. primary_text: max 100 chars, casual "
+                "and trend-aware tone (how a TikTok caption reads, not a "
+                "billboard), can include 1-2 relevant hashtags."
+            )
+        else:
+            prompt = (
+                f"Write Facebook/Instagram ad copy for this product:\n"
+                f"Name: {product.name}\n"
+                f"Category: {product.category}\n"
+                f"Price: ${product.selling_price or 0:.2f}\n"
+                f"Description: {(product.description or '')[:300]}\n\n"
+                "Return JSON only:\n"
+                '{"headline": "...", "primary_text": "...", "description": "..."}\n'
+                "headline: max 40 chars, punchy. primary_text: 1-2 sentences, "
+                "benefit-focused, include a light call to action. description: "
+                "max 30 chars, e.g. a price or urgency hook."
+            )
         try:
             data = await self.think_json(prompt, model=LLMModel.FAST, temperature=0.7)
             link = None
@@ -171,7 +196,7 @@ class AdvertisingAgent(BaseAgent):
                 "link": link,
             }
         except Exception as exc:
-            logger.warning("ad_creative_generation_failed", product=product.name, error=str(exc))
+            logger.warning("ad_creative_generation_failed", product=product.name, platform=platform, error=str(exc))
             return {
                 "headline": product.name[:40],
                 "primary_text": f"Check out {product.name} — now available.",
@@ -180,11 +205,25 @@ class AdvertisingAgent(BaseAgent):
                 "link": None,
             }
 
-    def _build_targeting(self, product: Product) -> Dict:
-        """Basic interest-based targeting derived from category. A human
-        reviews this at approval time — nothing here is final until then."""
+    def _build_targeting(self, product: Product, platform: str) -> Dict:
+        """Basic targeting derived from category. A human reviews this at
+        approval time — nothing here is final until then."""
         category = (product.category or "").lower()
         interests = CATEGORY_INTERESTS.get(category, ["Online shopping"])
+
+        if platform == "tiktok":
+            # TikTok's real interest-category IDs need a live /tool/
+            # interest_category/ lookup against the connected advertiser
+            # account — not fabricated here. Targeting starts broad
+            # (age/gender/US) and interests are left as a human-readable
+            # note for whoever reviews the approval to refine manually.
+            return {
+                "age_groups": ["AGE_25_34", "AGE_35_44"],
+                "gender": "GENDER_UNLIMITED",
+                "location_ids": None,  # client defaults to US
+                "interest_hint": interests,
+                "summary": f"US, ages 25-44, interest hint: {', '.join(interests)} (refine manually before activating)",
+            }
 
         return {
             "age_min": 22,
@@ -196,7 +235,7 @@ class AdvertisingAgent(BaseAgent):
         }
 
 
-async def launch_ad_campaign(campaign: AdCampaign, db) -> dict:
+async def launch_meta_campaign(campaign: AdCampaign, db) -> dict:
     """Actually create the campaign/ad set/creative/ad on Meta after human
     approval. Everything is created PAUSED on Meta's side — this never
     spends money by itself; a separate explicit activation in Meta Ads
@@ -220,7 +259,7 @@ async def launch_ad_campaign(campaign: AdCampaign, db) -> dict:
         adset_resp = await client.create_ad_set(
             campaign_id=platform_campaign_id,
             name=f"{campaign.name} — Ad Set",
-            daily_budget_cents=int((campaign.daily_budget or DEFAULT_DAILY_BUDGET) * 100),
+            daily_budget_cents=int((campaign.daily_budget or DEFAULT_DAILY_BUDGET_META) * 100),
             targeting=campaign.targeting,
         )
         platform_adset_id = adset_resp["id"]
@@ -252,6 +291,7 @@ async def launch_ad_campaign(campaign: AdCampaign, db) -> dict:
         logger.info(
             "ad_campaign_launched",
             campaign=campaign.name,
+            platform="meta",
             platform_campaign_id=platform_campaign_id,
         )
         return {
@@ -260,8 +300,83 @@ async def launch_ad_campaign(campaign: AdCampaign, db) -> dict:
             "note": "Created on Meta in PAUSED status — activate manually in Meta Ads Manager to start spending.",
         }
     except Exception as exc:
-        logger.error("ad_campaign_launch_failed", campaign=campaign.name, error=str(exc))
+        logger.error("ad_campaign_launch_failed", campaign=campaign.name, platform="meta", error=str(exc))
         campaign.status = CampaignStatus.FAILED
         campaign.rejection_reason = str(exc)
         await db.commit()
         return {"launched": False, "reason": "meta_error", "error": str(exc)}
+
+
+async def launch_tiktok_campaign(campaign: AdCampaign, db) -> dict:
+    """Actually create the campaign/ad group/ad on TikTok after human
+    approval. Everything is created in DISABLE (paused) status — this
+    never spends money by itself; a separate explicit activation in
+    TikTok's ads manager is required for that."""
+    if not settings.tiktok_access_token or not settings.tiktok_advertiser_id:
+        campaign.status = CampaignStatus.FAILED
+        campaign.rejection_reason = "TikTok not configured (missing access token / advertiser id)"
+        await db.commit()
+        return {"launched": False, "reason": "tiktok_not_configured"}
+
+    client = TikTokClient(
+        access_token=settings.tiktok_access_token,
+        advertiser_id=settings.tiktok_advertiser_id,
+    )
+
+    try:
+        creative = campaign.creative or {}
+        image_url = creative.get("image_url")
+        if not image_url:
+            raise ValueError("no product image available to upload for the TikTok ad creative")
+
+        image_resp = await client.upload_image_by_url(image_url)
+        image_id = image_resp["data"]["image_id"]
+
+        campaign_resp = await client.create_campaign(
+            name=campaign.name,
+            objective_type=campaign.objective,
+            budget=campaign.daily_budget or DEFAULT_DAILY_BUDGET_TIKTOK,
+        )
+        platform_campaign_id = campaign_resp["data"]["campaign_id"]
+
+        adgroup_resp = await client.create_ad_group(
+            campaign_id=platform_campaign_id,
+            name=f"{campaign.name} — Ad Group",
+            daily_budget=campaign.daily_budget or DEFAULT_DAILY_BUDGET_TIKTOK,
+            targeting=campaign.targeting or {},
+        )
+        platform_adgroup_id = adgroup_resp["data"]["adgroup_id"]
+
+        ad_resp = await client.create_ad(
+            adgroup_id=platform_adgroup_id,
+            image_id=image_id,
+            ad_name=f"{campaign.name} — Ad",
+            ad_text=creative.get("primary_text", "") or creative.get("headline", campaign.name),
+            landing_page_url=creative.get("link") or "https://theoasismarket-store.myshopify.com",
+        )
+
+        campaign.platform_campaign_id = platform_campaign_id
+        campaign.platform_adset_id = platform_adgroup_id
+        campaign.platform_ad_id = ad_resp["data"]["ad_ids"][0] if ad_resp.get("data", {}).get("ad_ids") else None
+        # Created on TikTok, but every object above defaults to DISABLE
+        # (paused) — reflect that here rather than implying it's spending.
+        campaign.status = CampaignStatus.PAUSED
+        await db.commit()
+
+        logger.info(
+            "ad_campaign_launched",
+            campaign=campaign.name,
+            platform="tiktok",
+            platform_campaign_id=platform_campaign_id,
+        )
+        return {
+            "launched": True,
+            "platform_campaign_id": platform_campaign_id,
+            "note": "Created on TikTok paused — activate manually in TikTok Ads Manager to start spending.",
+        }
+    except Exception as exc:
+        logger.error("ad_campaign_launch_failed", campaign=campaign.name, platform="tiktok", error=str(exc))
+        campaign.status = CampaignStatus.FAILED
+        campaign.rejection_reason = str(exc)
+        await db.commit()
+        return {"launched": False, "reason": "tiktok_error", "error": str(exc)}

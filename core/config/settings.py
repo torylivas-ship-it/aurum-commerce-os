@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     tiktok_app_id: Optional[str] = None
     tiktok_app_secret: Optional[str] = None
     tiktok_access_token: Optional[str] = None
+    tiktok_advertiser_id: Optional[str] = None
 
     # ── Google ────────────────────────────────────────────────────────────────
     google_api_key: Optional[str] = None

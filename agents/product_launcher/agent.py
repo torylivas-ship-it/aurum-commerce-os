@@ -59,10 +59,12 @@ class ProductLauncher:
         )
 
         # Enrich with AI description + image immediately after creation
-        await self._enrich_shopify_product(client, shopify_pid, product)
+        real_image_url = await self._enrich_shopify_product(client, shopify_pid, product)
 
         product.shopify_product_id = str(shopify_pid)
         product.status = ProductStatus.LAUNCHED
+        if real_image_url:
+            product.image_url = real_image_url
         product.evidence = {
             **(product.evidence or {}),
             "shopify_handle": shopify_product.get("handle"),
@@ -297,7 +299,7 @@ class ProductLauncher:
 
     async def _enrich_shopify_product(
         self, client: ShopifyClient, shopify_pid: int, product: Product
-    ) -> None:
+    ) -> Optional[str]:
         """Generate AI description and attach a real per-product image to the Shopify product."""
         import asyncio, json
         import urllib.request, urllib.parse
@@ -347,9 +349,16 @@ class ProductLauncher:
         updates["images"] = [image_spec]
 
         try:
-            await client.update_product(str(shopify_pid), updates)
+            result = await client.update_product(str(shopify_pid), updates)
+            images = result.get("images") or []
+            # Store the real, Shopify-hosted image URL back on our own
+            # Product row — without this it stays whatever (often nothing)
+            # was set at discovery time, and anything downstream that
+            # needs a real image (e.g. ad creative) silently gets None.
+            return images[0]["src"] if images else None
         except Exception as exc:
             logger.warning("enrich_shopify_update_failed", error=str(exc))
+            return None
 
     def _build_shopify_payload(self, product: Product) -> dict:
         price = round(product.selling_price or 0, 2)

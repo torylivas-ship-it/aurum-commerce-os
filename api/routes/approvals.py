@@ -117,8 +117,11 @@ async def decide_approval(
             )
             campaign = campaign_result.scalar_one_or_none()
             if campaign:
-                from agents.advertising import launch_ad_campaign
-                launch_result = await launch_ad_campaign(campaign, db)
+                from agents.advertising import launch_meta_campaign, launch_tiktok_campaign
+                if campaign.platform == "tiktok":
+                    launch_result = await launch_tiktok_campaign(campaign, db)
+                else:
+                    launch_result = await launch_meta_campaign(campaign, db)
 
         await event_bus.publish(Events.APPROVAL_RECEIVED, {
             "approval_id": str(approval_id),
