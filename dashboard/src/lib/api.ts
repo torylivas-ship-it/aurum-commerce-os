@@ -1,7 +1,19 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const LOCAL_HOSTS = ["localhost", "127.0.0.1"];
+
+// A localhost API URL only works in a browser on the Spark itself. Opened from another
+// device (e.g. http://192.168.0.46:3000), send requests to the same host the page came from.
+function apiBase(): string {
+  if (typeof window === "undefined") return API_URL;
+  const url = new URL(API_URL);
+  if (LOCAL_HOSTS.includes(url.hostname) && !LOCAL_HOSTS.includes(window.location.hostname)) {
+    url.hostname = window.location.hostname;
+  }
+  return url.origin;
+}
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     headers: { "Content-Type": "application/json", ...options?.headers },
     ...options,
   });

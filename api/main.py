@@ -36,6 +36,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    # The dashboard opened from another device on the home network (e.g. http://192.168.0.46:3000)
+    allow_origin_regex=r"^http://(127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|spark-2cfd(\.local)?):300[01]$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
